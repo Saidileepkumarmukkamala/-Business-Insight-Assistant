@@ -1,10 +1,15 @@
 """
 Single-file app: FastAPI backend + embedded web dashboard (Plotly via CDN).
+Prompts are built with LangChain (ChatPromptTemplate + LCEL); LLM calls use
+langchain-openai (ChatOpenAI → chat.completions under the hood).
+
 Run: python main.py
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,7 +19,9 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
-from openai import OpenAI
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 load_dotenv()
@@ -76,29 +83,91 @@ class DataService:
         )
 
 
+def _metrics_for_prompt(metrics: dict[str, Any]) -> str:
+    return json.dumps(metrics, indent=2)
+
+
 class AIService:
+    """OpenAI via LangChain ChatOpenAI; prompts orchestrated with ChatPromptTemplate."""
+
     def __init__(self) -> None:
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        self.client = OpenAI(api_key=self.api_key) if self.api_key else None
+        self._llm: ChatOpenAI | None = None
+        self._qa_chain = None
+        self._insights_chain = None
+
+        if self.api_key:
+            self._llm = ChatOpenAI(
+                model=self.model,
+                temperature=0,
+                api_key=self.api_key,
+            )
+            qa_prompt = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        "You are a business intelligence assistant. Use ONLY the metrics "
+                        "provided in the user message. If data is insufficient, say what is missing. "
+                        "Respond with: (1) direct answer, (2) short insight, (3) recommended action.",
+                    ),
+                    (
+                        "human",
+                        "Metrics:\n{metrics}\n\nUser question:\n{question}",
+                    ),
+                ]
+            )
+            self._qa_chain = qa_prompt | self._llm | StrOutputParser()
+
+            insights_prompt = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        "You are a business intelligence analyst. Use ONLY the provided metrics. "
+                        "Output must be a single JSON object only, no markdown fences, no extra text.",
+                    ),
+                    (
+                        "human",
+                        "Metrics:\n{metrics}\n\n"
+                        "Return a JSON object with exactly these string keys. Each value is 2–4 sentences.\n"
+                        '- "summary": executive summary of current performance\n'
+                        '- "trends": notable trends from monthly and category data\n'
+                        '- "recommendations": actionable recommendations for decision-makers',
+                    ),
+                ]
+            )
+            self._insights_chain = insights_prompt | self._llm | StrOutputParser()
+
+    @property
+    def enabled(self) -> bool:
+        return self._llm is not None
 
     def generate_response(self, question: str, metrics: dict[str, Any]) -> str:
-        if not self.client:
+        if not self._qa_chain:
             raise RuntimeError(
                 "OpenAI API key is not configured. Please set OPENAI_API_KEY in your .env file."
             )
-        prompt = (
-            "You are a business intelligence assistant. Use ONLY the provided metrics to answer.\n"
-            "If data is insufficient, say what is missing.\n\n"
-            f"Metrics:\n{metrics}\n\n"
-            f"User Question:\n{question}\n\n"
-            "Respond with: (1) direct answer, (2) short insight, (3) recommended action."
-        )
-        response = self.client.responses.create(
-            model=self.model,
-            input=prompt,
-        )
-        return response.output_text.strip()
+        return self._qa_chain.invoke(
+            {"metrics": _metrics_for_prompt(metrics), "question": question}
+        ).strip()
+
+    def generate_insights(self, metrics: dict[str, Any]) -> dict[str, str]:
+        if not self._insights_chain:
+            raise RuntimeError("OpenAI API key is not configured.")
+        raw = self._insights_chain.invoke({"metrics": _metrics_for_prompt(metrics)}).strip()
+        # Strip optional ```json ... ``` from model output
+        fence = re.match(r"^```(?:json)?\s*([\s\S]*?)\s*```$", raw, re.IGNORECASE)
+        if fence:
+            raw = fence.group(1).strip()
+        try:
+            parsed = json.loads(raw)
+            return {
+                "summary": str(parsed.get("summary", "")).strip(),
+                "trends": str(parsed.get("trends", "")).strip(),
+                "recommendations": str(parsed.get("recommendations", "")).strip(),
+            }
+        except json.JSONDecodeError:
+            return {"summary": raw, "trends": "", "recommendations": ""}
 
 
 data_path = Path(__file__).resolve().parent / "data" / "sample_business_data.csv"
@@ -124,6 +193,24 @@ def metrics() -> dict:
     return stats.__dict__
 
 
+@app.get("/insights")
+def insights() -> dict[str, str]:
+    """Proactive summary, trends, and recommendations (same data as dashboard)."""
+    if not ai_service.enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenAI API key is missing. Set OPENAI_API_KEY in .env and restart the server.",
+        )
+    try:
+        df = data_service.load_data()
+        stats = data_service.compute_metrics(df)
+        return ai_service.generate_insights(stats.__dict__)
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/ask")
 def ask(request: QueryRequest) -> dict[str, str]:
     try:
@@ -133,7 +220,7 @@ def ask(request: QueryRequest) -> dict[str, str]:
                 status_code=400,
                 detail="Please enter a question with at least 3 characters.",
             )
-        if not ai_service.client:
+        if not ai_service.enabled:
             raise HTTPException(
                 status_code=503,
                 detail="OpenAI API key is missing. Set OPENAI_API_KEY in .env and restart the server.",
@@ -175,19 +262,32 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     button:disabled { opacity: 0.6; cursor: not-allowed; }
     .info { background: #1c2128; border: 1px solid #30363d; border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.9rem; color: #8b949e; margin-bottom: 0.75rem; }
     #answer { white-space: pre-wrap; margin-top: 0.75rem; padding: 0.75rem; background: #0d1117; border-radius: 6px; border: 1px solid #30363d; min-height: 3rem; }
+    .insight-block { margin-top: 0.5rem; padding: 0.65rem; background: #0d1117; border-radius: 6px; border: 1px solid #30363d; font-size: 0.9rem; white-space: pre-wrap; }
+    .insight-block h3 { margin: 0 0 0.35rem; font-size: 0.8rem; color: #58a6ff; text-transform: uppercase; letter-spacing: 0.03em; }
     .err { color: #f85149; }
     .risks { font-size: 0.9rem; color: #8b949e; line-height: 1.5; }
   </style>
 </head>
 <body>
   <h1>AI-Powered Business Insight Assistant</h1>
-  <p class="sub">Dashboard and chatbot (same server). OpenAI API key required for chat.</p>
+  <p class="sub">Dashboard, proactive insights, and chatbot</p>
 
   <div class="kpis">
     <div class="kpi"><div class="label">Total revenue</div><div class="value" id="k1">—</div></div>
     <div class="kpi"><div class="label">Units sold</div><div class="value" id="k2">—</div></div>
     <div class="kpi"><div class="label">Avg satisfaction</div><div class="value" id="k3">—</div></div>
     <div class="kpi"><div class="label">Top category</div><div class="value" id="k4">—</div></div>
+  </div>
+
+  <div class="card" style="margin-bottom:1rem">
+    <h2>AI insights (on load)</h2>
+    <div id="insights-loading">Loading insights…</div>
+    <div id="insights-body" style="display:none">
+      <div class="insight-block"><h3>Summary</h3><div id="ins-summary"></div></div>
+      <div class="insight-block"><h3>Trend analysis</h3><div id="ins-trends"></div></div>
+      <div class="insight-block"><h3>Recommendations</h3><div id="ins-rec"></div></div>
+    </div>
+    <div id="insights-err" class="err" style="display:none;margin-top:0.5rem"></div>
   </div>
 
   <div class="grid">
@@ -197,7 +297,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
   <div class="card">
     <h2>AI chatbot</h2>
-    <div class="info">OpenAI is required for answers. Without <code>OPENAI_API_KEY</code>, <code>POST /ask</code> returns 503.</div>
     <label for="preset">Sample question</label>
     <select id="preset">
       <option value="">— Choose or type below —</option>
@@ -209,11 +308,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <textarea id="q" rows="3" placeholder="Ask about the dataset…"></textarea>
     <button type="button" id="btn">Ask AI</button>
     <div id="answer"></div>
-  </div>
-
-  <div class="card" style="margin-top:1rem">
-    <h2>Ethical and risk considerations</h2>
-    <p class="risks">Bias from incomplete data; protect business data before external APIs; models can hallucinate; keep API keys and endpoints secured.</p>
   </div>
 
   <script>
@@ -234,6 +328,30 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       const cats = m.category_revenue.map((x) => x.product_category);
       const catRev = m.category_revenue.map((x) => x.sales_amount);
       Plotly.newPlot('category', [{ x: cats, y: catRev, type: 'bar', marker: { color: '#3fb950' } }], { ...plotLayout, title: 'Category performance', xaxis: { title: 'Category' }, yaxis: { title: 'Revenue' } }, { responsive: true, displayModeBar: false });
+    }
+
+    async function loadInsights() {
+      const loading = document.getElementById('insights-loading');
+      const body = document.getElementById('insights-body');
+      const errEl = document.getElementById('insights-err');
+      try {
+        const r = await fetch('/insights');
+        const data = await r.json().catch(() => ({}));
+        loading.style.display = 'none';
+        if (!r.ok) {
+          errEl.style.display = 'block';
+          errEl.textContent = (data && data.detail) ? (typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)) : ('Error ' + r.status);
+          return;
+        }
+        document.getElementById('ins-summary').textContent = data.summary || '';
+        document.getElementById('ins-trends').textContent = data.trends || '';
+        document.getElementById('ins-rec').textContent = data.recommendations || '';
+        body.style.display = 'block';
+      } catch (e) {
+        loading.style.display = 'none';
+        errEl.style.display = 'block';
+        errEl.textContent = String(e);
+      }
     }
 
     document.getElementById('preset').addEventListener('change', (e) => {
@@ -270,6 +388,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       document.getElementById('answer').className = 'err';
       document.getElementById('answer').textContent = 'Failed to load metrics: ' + e;
     });
+    loadInsights();
   </script>
 </body>
 </html>

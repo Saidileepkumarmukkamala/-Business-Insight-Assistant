@@ -3,3 +3,5 @@ uvicorn
 pandas
 python-dotenv
 openai
+langchain-core
+langchain-openai

@@ -29,7 +29,6 @@ from main import ai_service, get_metrics_dict
 
 st.set_page_config(page_title="Business Insight Assistant", layout="wide")
 st.title("AI-Powered Business Insight Assistant")
-st.caption("Streamlit Cloud deployment — same logic as `main.py` (LangChain + OpenAI).")
 
 metrics = get_metrics_dict()
 

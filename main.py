@@ -174,6 +174,13 @@ data_path = Path(__file__).resolve().parent / "data" / "sample_business_data.csv
 data_service = DataService(data_path=data_path)
 ai_service = AIService()
 
+
+def get_metrics_dict() -> dict[str, Any]:
+    """Shared metrics payload for FastAPI routes and Streamlit Cloud entrypoint."""
+    df = data_service.load_data()
+    return data_service.compute_metrics(df).__dict__
+
+
 app = FastAPI(title="AI-Powered Business Insight Assistant")
 
 
@@ -188,9 +195,7 @@ def health() -> dict[str, str]:
 
 @app.get("/metrics")
 def metrics() -> dict:
-    df = data_service.load_data()
-    stats = data_service.compute_metrics(df)
-    return stats.__dict__
+    return get_metrics_dict()
 
 
 @app.get("/insights")
@@ -202,9 +207,7 @@ def insights() -> dict[str, str]:
             detail="OpenAI API key is missing. Set OPENAI_API_KEY in .env and restart the server.",
         )
     try:
-        df = data_service.load_data()
-        stats = data_service.compute_metrics(df)
-        return ai_service.generate_insights(stats.__dict__)
+        return ai_service.generate_insights(get_metrics_dict())
     except HTTPException:
         raise
     except Exception as exc:  # pragma: no cover
@@ -226,9 +229,7 @@ def ask(request: QueryRequest) -> dict[str, str]:
                 detail="OpenAI API key is missing. Set OPENAI_API_KEY in .env and restart the server.",
             )
 
-        df = data_service.load_data()
-        stats = data_service.compute_metrics(df)
-        answer = ai_service.generate_response(cleaned_question, stats.__dict__)
+        answer = ai_service.generate_response(cleaned_question, get_metrics_dict())
         return {"answer": answer}
     except HTTPException:
         raise

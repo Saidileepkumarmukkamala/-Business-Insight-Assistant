@@ -1,5 +1,7 @@
 fastapi
 uvicorn
+streamlit
+plotly
 pandas
 python-dotenv
 openai

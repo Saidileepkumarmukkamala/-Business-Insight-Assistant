@@ -1,0 +1,17 @@
+date,product_category,product_name,sales_amount,units_sold,customer_satisfaction
+2026-01-05,Electronics,Smart Speaker,5400,120,4.3
+2026-01-12,Electronics,Wireless Earbuds,6200,140,4.5
+2026-01-18,Home,Air Purifier,4100,80,4.1
+2026-01-25,Fashion,Running Shoes,3800,95,4.0
+2026-02-03,Electronics,Smart Watch,7000,130,4.4
+2026-02-10,Home,Robot Vacuum,5600,70,4.2
+2026-02-16,Fashion,Winter Jacket,2900,60,3.8
+2026-02-24,Beauty,Skin Care Kit,3300,100,4.1
+2026-03-02,Electronics,Tablet,8100,110,4.3
+2026-03-08,Home,Coffee Machine,4700,85,4.2
+2026-03-15,Fashion,Backpack,3500,105,4.0
+2026-03-22,Beauty,Hair Dryer,2600,75,3.9
+2026-03-29,Electronics,Gaming Mouse,4300,160,4.5
+2026-04-04,Home,Blender,2800,90,4.0
+2026-04-11,Fashion,Sunglasses,3200,120,4.1
+2026-04-15,Beauty,Perfume,3900,65,4.2

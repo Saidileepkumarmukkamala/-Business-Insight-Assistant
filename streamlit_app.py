@@ -96,9 +96,3 @@ else:
                     st.write(ans)
                 except Exception as exc:
                     st.error(str(exc))
-
-st.subheader("Ethical and risk considerations")
-st.write(
-    "Bias from incomplete data; protect business data before external APIs; "
-    "models can hallucinate; keep API keys in **Secrets**, not in the repo."
-)
